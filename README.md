@@ -22,6 +22,8 @@ Symlinks every skill and workflow into `~/.claude/`. Re-run after adding or pull
 - **merge**: commit, rebase, and merge the current branch.
 - **open-pr**: write a PR description from conversation context and open PR creation in the browser.
 - **rebase**: rebase the current branch with smart conflict resolution.
+- **rebase-mrs**: scans my open GitLab MRs across all projects, server-side rebases the unapproved-but-behind ones, and flags approved-but-stale ones. Schedule via `/loop 1h /rebase-mrs --working-hours-only` (inside Claude Code) or launchd (`skills/rebase-mrs/launchd/install.sh`, true set-and-forget). Trigger manually: `/rebase-mrs` (add `--dry-run` to preview).
+- **rebase-mrs-review**: reads the rebase-mrs state file and gives a triage briefing: what's been rebased, which approved MRs are stale, conflicts, proposed next actions, optional Slack draft. Read-only. Trigger: `/rebase-mrs-review`.
 - **rebase-stale-mrs**: rebase your open, non-draft, unapproved GitLab MRs via the server-side rebase API.
 - **rephrase**: paste text, get it rephrased clearer and more empathetic in your voice. Trigger: `/rephrase <text>` (or `/rephrase` then paste in the next message).
 - **teach**: teacher mode, make sure you deeply understand the current session before moving on.

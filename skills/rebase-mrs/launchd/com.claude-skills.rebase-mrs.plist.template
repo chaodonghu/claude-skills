@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude-skills.rebase-mrs</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>__SCRIPT_PATH__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <!-- Hours below are in the machine's local timezone. The install script
+       generates these for you based on the working hours you choose. -->
+  <key>StartCalendarInterval</key>
+  <array>
+__INTERVALS__
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/rebase-mrs.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/rebase-mrs.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
