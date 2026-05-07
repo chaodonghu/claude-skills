@@ -94,6 +94,52 @@ append_json() {
   printf -v "$var" '%s' "$(jq -c --argjson o "$obj" '. + [$o]' <<<"$cur")"
 }
 
+# Resolves notification state for a given URL within a state-file bucket
+# (warnings_by_url or conflicts_by_url). Sets two globals:
+#   _SHOULD_NOTIFY = 0|1   — whether to emit *_JSON for this URL on this run
+#   _NOTIFIED_AT   = ISO   — value to persist as last_notified_at
+# Args: $1 = bucket name (warnings_by_url|conflicts_by_url), $2 = url
+resolve_cooldown() {
+  local bucket="$1" url="$2"
+  local prev_notified prev_epoch notify_age
+  prev_notified=$(jq -r --arg b "$bucket" --arg u "$url" '.[$b][$u].last_notified_at // empty' <<<"$prev_state")
+  _SHOULD_NOTIFY=1
+  if [ -n "$prev_notified" ]; then
+    prev_epoch=$(date -u -d "$prev_notified" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$prev_notified" +%s 2>/dev/null || echo 0)
+    if [ "$prev_epoch" -gt 0 ]; then
+      notify_age=$(( (now_epoch - prev_epoch) / 3600 ))
+      if [ "$notify_age" -lt "$NOTIFY_COOLDOWN_HOURS" ]; then
+        _SHOULD_NOTIFY=0
+      fi
+    fi
+  fi
+  if [ "$_SHOULD_NOTIFY" = "1" ]; then
+    _NOTIFIED_AT="$NOW_ISO"
+  else
+    _NOTIFIED_AT="$prev_notified"
+  fi
+}
+
+# Emit a CONFLICT_JSON line (with cooldown) and append to conflicts_json.
+# Uses the loop-local vars: web_url, title, target_branch, project_path, iid, diverged.
+emit_conflict() {
+  local merge_error="$1"
+  resolve_cooldown conflicts_by_url "$web_url"
+  local obj
+  obj=$(jq -nc \
+    --arg url "$web_url" \
+    --arg title "$title" \
+    --arg target "$target_branch" \
+    --arg project "$project_path" \
+    --arg merge_error "$merge_error" \
+    --arg notified "$_NOTIFIED_AT" \
+    --argjson iid "$iid" \
+    --argjson diverged "$diverged" \
+    '{url:$url,title:$title,target:$target,project:$project,iid:$iid,diverged:$diverged,merge_error:$merge_error,last_notified_at:$notified}')
+  [ "$_SHOULD_NOTIFY" = "1" ] && echo "CONFLICT_JSON: $obj"
+  append_json conflicts_json "$obj"
+}
+
 # Iterate using a stable JSON-per-line stream.
 while IFS= read -r mr; do
   project_id=$(jq -r '.project_id' <<<"$mr")
@@ -101,7 +147,6 @@ while IFS= read -r mr; do
   title=$(jq -r '.title' <<<"$mr")
   web_url=$(jq -r '.web_url' <<<"$mr")
   target_branch=$(jq -r '.target_branch' <<<"$mr")
-  source_branch=$(jq -r '.source_branch' <<<"$mr")
   project_path=$(jq -r '.web_url | capture("gitlab.com/(?<p>.+)/-/merge_requests/").p' <<<"$mr")
   is_draft=$(jq -r '.draft // .work_in_progress // false' <<<"$mr")
 
@@ -123,7 +168,6 @@ while IFS= read -r mr; do
 
   diverged=$(jq -r '.diverged_commits_count // 0' <<<"$detail")
   updated_at=$(jq -r '.updated_at' <<<"$detail")
-  has_conflicts=$(jq -r '.has_conflicts // false' <<<"$detail")
 
   # 3. Approvals.
   approvals=$(glab api "projects/$project_id/merge_requests/$iid/approvals" 2>/dev/null) || approvals='{"approved_by":[]}'
@@ -147,43 +191,20 @@ while IFS= read -r mr; do
       action="warn"; reason="approved+stale (${age_hours}h)"
       warned=$((warned+1))
 
-      # Check cooldown: when did we last notify about this URL?
-      prev_notified=$(jq -r --arg url "$web_url" '.warnings_by_url[$url].last_notified_at // empty' <<<"$prev_state")
-      should_notify=1
-      if [ -n "$prev_notified" ]; then
-        prev_epoch=$(date -u -d "$prev_notified" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$prev_notified" +%s 2>/dev/null || echo 0)
-        if [ "$prev_epoch" -gt 0 ]; then
-          notify_age=$(( (now_epoch - prev_epoch) / 3600 ))
-          if [ "$notify_age" -lt "$NOTIFY_COOLDOWN_HOURS" ]; then
-            should_notify=0
-          fi
-        fi
-      fi
-
-      # If we're notifying, last_notified_at = now. Otherwise preserve the prior value.
-      if [ "$should_notify" = "1" ]; then
-        notified_at="$NOW_ISO"
-      else
-        notified_at="$prev_notified"
-      fi
-
+      resolve_cooldown warnings_by_url "$web_url"
       warn_obj=$(jq -nc \
         --arg url "$web_url" \
         --arg title "$title" \
         --arg target "$target_branch" \
         --arg project "$project_path" \
-        --arg notified "$notified_at" \
+        --arg notified "$_NOTIFIED_AT" \
         --argjson iid "$iid" \
         --argjson diverged "$diverged" \
         --argjson age "$age_hours" \
         --argjson approvers "$approver_count" \
         '{url:$url,title:$title,target:$target,project:$project,iid:$iid,diverged:$diverged,age_hours:$age,approvers:$approvers,last_notified_at:$notified}')
 
-      if [ "$should_notify" = "1" ]; then
-        # Emit WARN_JSON only when actually notifying — keeps the loop quiet for
-        # persistent warnings within the cooldown window.
-        echo "WARN_JSON: $warn_obj"
-      fi
+      [ "$_SHOULD_NOTIFY" = "1" ] && echo "WARN_JSON: $warn_obj"
       append_json warnings_json "$warn_obj"
     else
       action="skip"; reason="approved (fresh)"
@@ -199,7 +220,7 @@ while IFS= read -r mr; do
       if ! glab api -X PUT "projects/$project_id/merge_requests/$iid/rebase" >/dev/null 2>&1; then
         action="conflict"; reason="rebase trigger failed"
         conflicts=$((conflicts+1))
-        append_json conflicts_json "$(jq -nc --arg url "$web_url" --arg title "$title" --arg target "$target_branch" --arg project "$project_path" --argjson iid "$iid" --argjson diverged "$diverged" --arg merge_error "trigger failed" '{url:$url,title:$title,target:$target,project:$project,iid:$iid,diverged:$diverged,merge_error:$merge_error}')"
+        emit_conflict "trigger failed"
       else
         # Poll.
         elapsed=0
@@ -218,11 +239,11 @@ while IFS= read -r mr; do
         if [ "$in_progress" = "true" ]; then
           action="conflict"; reason="rebase timeout (${REBASE_POLL_TIMEOUT}s)"
           conflicts=$((conflicts+1))
-          append_json conflicts_json "$(jq -nc --arg url "$web_url" --arg title "$title" --arg target "$target_branch" --arg project "$project_path" --argjson iid "$iid" --argjson diverged "$diverged" --arg merge_error "$reason" '{url:$url,title:$title,target:$target,project:$project,iid:$iid,diverged:$diverged,merge_error:$merge_error}')"
+          emit_conflict "$reason"
         elif [ -n "$merge_error" ] && [ "$merge_error" != "null" ]; then
           action="conflict"; reason="$merge_error"
           conflicts=$((conflicts+1))
-          append_json conflicts_json "$(jq -nc --arg url "$web_url" --arg title "$title" --arg target "$target_branch" --arg project "$project_path" --argjson iid "$iid" --argjson diverged "$diverged" --arg merge_error "$merge_error" '{url:$url,title:$title,target:$target,project:$project,iid:$iid,diverged:$diverged,merge_error:$merge_error}')"
+          emit_conflict "$merge_error"
         else
           action="rebased"; reason="behind by $diverged"
           rebased=$((rebased+1))

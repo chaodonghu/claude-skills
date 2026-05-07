@@ -1,6 +1,6 @@
 ---
 name: rebase-mrs
-description: Scans the user's open GitLab MRs across all projects, rebases the unapproved-but-behind ones onto their target branch, and Slack-DMs warnings about approved-but-stale MRs. Use when the user types `/rebase-mrs`, when scheduled to run via the `/schedule` skill, or when the user asks to "rebase my MRs", "check my open MRs", or "see which MRs are out of date".
+description: Scans the user's open GitLab MRs across all projects, rebases the unapproved-but-behind ones onto their target branch, and DMs (or prints) warnings about approved-but-stale MRs and rebase conflicts. Use when the user types `/rebase-mrs`, when fired from a `/loop` schedule, or when the user asks to "rebase my MRs", "check my open MRs", or "see which MRs are out of date".
 ---
 
 # Rebase My MRs
@@ -42,11 +42,13 @@ The script writes:
 
 If the script exits non-zero, surface the error and stop. Don't try to recover by hand.
 
-## Step 2 — Slack DM warnings
+## Step 2 — Slack DM warnings and conflicts
 
-After the script finishes, parse every `WARN_JSON: {...}` line from its stdout. **The script already de-duplicates within a 24h cooldown window, so any WARN_JSON line you see is meant to be sent.** Don't add your own dedup logic on top.
+After the script finishes, parse every `WARN_JSON: {...}` and `CONFLICT_JSON: {...}` line from its stdout. **The script already de-duplicates within a 24h cooldown window per URL, so any line you see is meant to be sent.** Don't add your own dedup logic on top.
 
-For each WARN_JSON line, you MUST send a Slack DM to the user identified by `$SLACK_DM_HANDLE` with this exact template (substitute the JSON fields):
+### Templates
+
+For each `WARN_JSON` line:
 
 ```
 :warning: MR out of date and not yet rebased (has approvals): <{url}|{title}>
@@ -54,15 +56,25 @@ Target: `{target}`  ·  behind by {diverged} commits  ·  last updated {age_hour
 Skipping rebase to avoid invalidating approvals. Rebase manually when ready.
 ```
 
-Procedure:
-1. Read `$SLACK_DM_HANDLE`. If unset, print the warnings to chat instead and tell the user "SLACK_DM_HANDLE not set, skipping Slack DM." Do NOT try to send without a configured handle.
+For each `CONFLICT_JSON` line:
+
+```
+:rotating_light: Rebase conflict — manual fix needed: <{url}|{title}>
+Target: `{target}`  ·  behind by {diverged} commits
+Error: {merge_error}
+```
+
+### Procedure
+
+1. Read `$SLACK_DM_HANDLE`. If unset, print the messages to chat instead and tell the user "SLACK_DM_HANDLE not set, skipping Slack DM." Do NOT try to send without a configured handle.
 2. Call `mcp__claude_ai_Slack__slack_search_users` with the handle. Take the first matching user's identifier.
 3. Call `mcp__claude_ai_Slack__slack_send_message` with that user as the destination and the templated message as the body. Use `mrkdwn` formatting so the `<{url}|{title}>` link renders.
-4. If the Slack MCP tool is not available in the current run (e.g. you're being invoked outside a Claude Code session that has it loaded), fall back to printing to chat and explicitly say "Slack MCP unavailable, printed warnings to chat instead."
+4. Send conflicts before warnings — they're more urgent (rebase is fully blocked, vs. just stale).
+5. If the Slack MCP tool is not available in the current run, fall back to printing to chat and explicitly say "Slack MCP unavailable, printed messages to chat instead."
 
-If there are zero `WARN_JSON:` lines, do not send any Slack message and do not say anything about Slack. Silence is the success state.
+If there are zero `WARN_JSON:` and zero `CONFLICT_JSON:` lines, do not send any Slack message and do not say anything about Slack. Silence is the success state.
 
-Failure handling: if `slack_search_users` returns nothing or `slack_send_message` errors, surface the error in chat and print the warning text. Do not retry silently.
+Failure handling: if `slack_search_users` returns nothing or `slack_send_message` errors, surface the error in chat and print the message text. Do not retry silently.
 
 ## Step 3 — Report
 
@@ -74,7 +86,7 @@ If there were any conflicts, list them with their URLs at the bottom so the user
 
 Two supported scheduling paths. Pick one based on whether you want it tied to your Claude Code session.
 
-### Option A — `/loop` inside Claude Code (recommended for this user)
+### Option A — `/loop` inside Claude Code (recommended)
 
 In an active Claude Code session, run:
 
