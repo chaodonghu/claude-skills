@@ -16,6 +16,20 @@ export const meta = {
 //   [{key:"ENG-1", spec:"what to build"}, ...] -> tickets with inline specs
 //   { tickets:[...], repoPath, install, check, bootstrapFiles, contextCommand, mrTool, baseBranch }
 function parseArgs(a) {
+  // The harness may deliver args as a JSON-encoded string; normalize first.
+  if (typeof a === 'string') {
+    const s = a.trim()
+    if (s.startsWith('{') || s.startsWith('[')) {
+      try {
+        a = JSON.parse(s)
+      } catch {
+        // not JSON: fall through to the comma-list handling below
+      }
+    }
+    if (typeof a === 'string') {
+      a = { tickets: a.split(',').map((k) => k.trim()).filter(Boolean) }
+    }
+  }
   if (!a) {
     throw new Error(
       'Pass args: a list of tickets, or {tickets, ...config}. A ticket is a key string or {key, spec}. Config (all optional): repoPath, install, check, bootstrapFiles[], contextCommand ("{key}" substituted), mrTool ("glab"|"gh"|"auto"), baseBranch (default "main").',
